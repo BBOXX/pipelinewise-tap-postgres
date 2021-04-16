@@ -30,6 +30,18 @@ def fetch_max_replication_key(conn_config, replication_key, schema_name, table_n
             return max_key
 
 
+# pylint: disable=invalid-name,missing-function-docstring
+def fetch_replication_key_datatype(replication_key, schema_name, table_name, conn_info):
+    with post_db.open_connection(conn_info) as conn:
+        with conn.cursor() as cur:
+            datatype_sql = "select pg_typeof({}) from {} limit 1;".\
+                    format(replication_key,
+                           post_db.fully_qualified_table_name(schema_name, table_name))
+            cur.execute(datatype_sql)
+            datatype = cur.fetchone()[0]
+    return datatype
+
+
 # pylint: disable=too-many-locals
 def sync_table(conn_info, stream, state, desired_columns, md_map):
     time_extracted = utils.now()
@@ -57,7 +69,15 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
 
     replication_key = md_map.get((), {}).get('replication-key')
     replication_key_value = singer.get_bookmark(state, stream['tap_stream_id'], 'replication_key_value')
-    replication_key_sql_datatype = md_map.get(('properties', replication_key)).get('sql-datatype')
+    if replication_key in md_map.get('properties', {}):
+        replication_key_sql_datatype = md_map.get(('properties', replication_key)).get('sql-datatype')
+        replication_key_sql = post_db.prepare_columns_sql(replication_key)
+    else:
+        replication_key_sql_datatype = fetch_replication_key_datatype(replication_key,
+                                                                      schema_name,
+                                                                      stream['table_name'],
+                                                                      conn_info)
+        replication_key_sql = replication_key
 
     hstore_available = post_db.hstore_available(conn_info)
     with metrics.record_counter(None) as counter:
@@ -87,10 +107,10 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                                     ORDER BY {} ASC""".format(','.join(escaped_columns),
                                                               post_db.fully_qualified_table_name(schema_name,
                                                                                                  stream['table_name']),
-                                                              post_db.prepare_columns_sql(replication_key),
+                                                              replication_key_sql,
                                                               replication_key_value,
                                                               replication_key_sql_datatype,
-                                                              post_db.prepare_columns_sql(replication_key))
+                                                              replication_key_sql)
                 else:
                     #if not replication_key_value
                     select_sql = """SELECT {}
@@ -98,7 +118,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                                     ORDER BY {} ASC""".format(','.join(escaped_columns),
                                                               post_db.fully_qualified_table_name(schema_name,
                                                                                                  stream['table_name']),
-                                                              post_db.prepare_columns_sql(replication_key))
+                                                              replication_key_sql)
 
                 LOGGER.info('select statement: %s with itersize %s', select_sql, cur.itersize)
                 cur.execute(select_sql)
